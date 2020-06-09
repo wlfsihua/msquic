@@ -8,6 +8,11 @@
 #include "gtest/gtest.h"
 #include "msquichelper.h"
 
+#include <vector>
+#include <fstream>
+
+extern std::vector<std::pair<uint64_t, uint64_t>> timingData;
+
 extern "C" void QuicTraceRundown(void) { }
 
 int main(int argc, char* argv[]) {
@@ -17,5 +22,10 @@ int main(int argc, char* argv[]) {
     int res = RUN_ALL_TESTS();
     QuicPlatformUninitialize();
     QuicPlatformSystemUnload();
+
+    std::ofstream output{"Results.csv"};
+    for (auto&& d : timingData) {
+        output << d.first << ", " << d.second << std::endl;
+    }
 
 }
