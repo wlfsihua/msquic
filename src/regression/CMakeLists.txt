@@ -5,7 +5,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${QUIC_CXX_FLAGS}")
 
 add_executable(quicregression 
     quic_regression_gtest.cpp
-    loopback.cpp)
+    loopback.cpp
+    connections.cpp)
 
 target_link_libraries(quicregression msquic platform gtest)
 

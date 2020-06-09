@@ -11,7 +11,8 @@
 #include <vector>
 #include <fstream>
 
-extern std::vector<std::pair<uint64_t, uint64_t>> timingData;
+extern std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
+extern std::vector<std::pair<uint64_t, uint64_t>> ConnectionTimingData;
 
 extern "C" void QuicTraceRundown(void) { }
 
@@ -23,9 +24,18 @@ int main(int argc, char* argv[]) {
     QuicPlatformUninitialize();
     QuicPlatformSystemUnload();
 
-    std::ofstream output{"Results.csv"};
-    for (auto&& d : timingData) {
-        output << d.first << ", " << d.second << std::endl;
+    {
+        std::ofstream output{ "LoopbackResults.csv" };
+        for (auto&& d : LoopbackTimingData) {
+            output << d.first << ", " << d.second << std::endl;
+        }
+    }
+
+    {
+        std::ofstream output{ "ConnectionResults.csv" };
+        for (auto&& d : ConnectionTimingData) {
+            output << d.first << ", " << d.second << std::endl;
+        }
     }
 
 }

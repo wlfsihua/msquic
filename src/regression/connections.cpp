@@ -16,27 +16,20 @@
 #include <vector>
 
 constexpr uint16_t UdpPort = 4567;
-const QUIC_BUFFER Alpn = { sizeof("loopback") - 1, (uint8_t*)"loopback" };
+const QUIC_BUFFER Alpn = { sizeof("connection") - 1, (uint8_t*)"connection" };
 
-class LoopbackServer
+class ConnectionServer
 {
 public:
     QUIC_STATUS
-    StreamHandler(
-        HQUIC Stream,
-        QUIC_STREAM_EVENT& Event
+        StreamHandler(
+            HQUIC Stream,
+            QUIC_STREAM_EVENT& Event
         )
     {
         switch (Event.Type) {
         case QUIC_STREAM_EVENT_RECEIVE:
-            TotalBytesReceived.fetch_add(Event.RECEIVE.TotalBufferLength);
-            if ((Event.RECEIVE.Flags & QUIC_SEND_FLAG_FIN) != 0) {
-                {
-                    std::lock_guard Lock{ TimeMutex };
-                    EndTime = std::chrono::steady_clock::now();
-                }
-                StreamFinishedSending.set_value();
-            }
+            MsQuic->StreamSend(Stream, &QuicBuffer, 1, QUIC_SEND_FLAG_FIN, nullptr);
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
@@ -51,22 +44,18 @@ public:
         return QUIC_STATUS_SUCCESS;
     }
 
-    QUIC_STATUS 
-    ConnectionHandler(
-        HQUIC Connection, 
-        QUIC_CONNECTION_EVENT& Event
+    QUIC_STATUS
+        ConnectionHandler(
+            HQUIC Connection,
+            QUIC_CONNECTION_EVENT& Event
         )
     {
         switch (Event.Type) {
         case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
             QUIC_STREAM_CALLBACK_HANDLER Handler = [](HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event) {
-                return ((LoopbackServer*)Context)->StreamHandler(Stream, *Event);
+                return ((ConnectionServer*)Context)->StreamHandler(Stream, *Event);
             };
             MsQuic->SetCallbackHandler(Event.PEER_STREAM_STARTED.Stream, (void*)Handler, this);
-            {
-                std::lock_guard Lock{ TimeMutex };
-                StartTime = std::chrono::steady_clock::now();
-            }
             break;
         }
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
@@ -76,16 +65,16 @@ public:
         return QUIC_STATUS_SUCCESS;
     }
 
-    QUIC_STATUS 
-    ListenerHandler(
-        QUIC_LISTENER_EVENT& Event
+    QUIC_STATUS
+        ListenerHandler(
+            QUIC_LISTENER_EVENT& Event
         )
     {
         switch (Event.Type) {
         case QUIC_LISTENER_EVENT_NEW_CONNECTION: {
             Event.NEW_CONNECTION.SecurityConfig = SecConfig;
             QUIC_CONNECTION_CALLBACK_HANDLER Handler = [](HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event) {
-                return ((LoopbackServer*)Context)->ConnectionHandler(Connection, *Event);
+                return ((ConnectionServer*)Context)->ConnectionHandler(Connection, *Event);
             };
             MsQuic->SetCallbackHandler(Event.NEW_CONNECTION.Connection, (void*)Handler, this);
             break;
@@ -94,9 +83,10 @@ public:
         return QUIC_STATUS_SUCCESS;
     }
 
-    LoopbackServer(
-        bool& WasSuccessful
-        )
+    ConnectionServer(
+        bool& WasSuccessful,
+        int DataSize
+    )
     {
         WasSuccessful = false;
         if (QUIC_FAILED(MsQuicOpen(&MsQuic))) {
@@ -105,7 +95,7 @@ public:
 
         // Create a registration
         QUIC_REGISTRATION_CONFIG Config{
-            "LoopbackTestServer",
+            "ConnectionTestServer",
             QUIC_EXECUTION_PROFILE::QUIC_EXECUTION_PROFILE_LOW_LATENCY
         };
         if (QUIC_FAILED(MsQuic->RegistrationOpen(&Config, &Registration))) {
@@ -138,7 +128,7 @@ public:
         }
 
         if (QUIC_FAILED(MsQuic->ListenerOpen(Session, [](HQUIC Listener, void* Context, QUIC_LISTENER_EVENT* Event) {
-            return ((LoopbackServer*)Context)->ListenerHandler(*Event);
+            return ((ConnectionServer*)Context)->ListenerHandler(*Event);
             }, this, &listener))) {
             return;
         }
@@ -151,11 +141,15 @@ public:
             return;
         }
 
+        BufferData = std::make_unique<uint8_t[]>(DataSize);
+        QuicBuffer.Buffer = BufferData.get();
+        QuicBuffer.Length = DataSize;
+
         WasSuccessful = true;
     }
 
-    ~LoopbackServer(
-        )
+    ~ConnectionServer(
+    )
     {
         if (MsQuic) {
             if (listener) {
@@ -179,28 +173,6 @@ public:
         }
     }
 
-    bool
-    WaitForStreamFinish(
-        )
-    {
-        return StreamFinishedSending.get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready;
-    }
-
-    uint64_t
-    GetTotalBytesReceived(
-        )
-    {
-        return TotalBytesReceived.load();
-    }
-
-    auto
-    GetTimeDelta(
-        )
-    {
-        std::lock_guard lock{ TimeMutex };
-        return EndTime - StartTime;
-    }
-
 private:
     const QUIC_API_TABLE* MsQuic = nullptr;
     HQUIC Registration = nullptr;
@@ -208,54 +180,61 @@ private:
     QUIC_SEC_CONFIG_PARAMS* CertParams = nullptr;
     QUIC_SEC_CONFIG* SecConfig = nullptr;
     HQUIC listener = nullptr;
-    std::atomic_uint64_t TotalBytesReceived{ 0 };
-    std::mutex TimeMutex;
-    std::chrono::steady_clock::time_point StartTime;
-    std::chrono::steady_clock::time_point EndTime;
-    std::promise<void> StreamFinishedSending;
+    QUIC_BUFFER QuicBuffer{};
+    std::unique_ptr<uint8_t[]> BufferData;
 };
 
-class LoopbackClient
+class ConnectionClient
 {
 public:
 
     QUIC_STATUS
-    StreamEvent(
-        HQUIC Stream, 
-        QUIC_STREAM_EVENT& Event
-    )
+        StreamEvent(
+            HQUIC Stream,
+            QUIC_STREAM_EVENT& Event
+        )
     {
         switch (Event.Type) {
-        case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            MsQuic->StreamSend(Stream, &QuicBuffer, 1, KeepSending.load() ? QUIC_SEND_FLAG_NONE : QUIC_SEND_FLAG_FIN, nullptr);
+        case QUIC_STREAM_EVENT_RECEIVE:
+            MsQuic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             MsQuic->StreamClose(Stream);
+            Stream = nullptr;
+            MsQuic->ConnectionShutdown(Connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
         }
         return QUIC_STATUS_SUCCESS;
     }
 
-    QUIC_STATUS 
-    ConnectionEvent(
-        HQUIC Connection,
-        QUIC_CONNECTION_EVENT& Event
+    QUIC_STATUS
+        ConnectionEvent(
+            HQUIC Connection,
+            QUIC_CONNECTION_EVENT& Event
         )
     {
         switch (Event.Type) {
         case QUIC_CONNECTION_EVENT_CONNECTED:
-            ConnectionPromise.set_value();
+            MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_NONE, [](HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event) {
+                return ((ConnectionClient*)Context)->StreamEvent(Stream, *Event);
+                }, this, &Stream);
+
+            MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
+            MsQuic->StreamSend(Stream, &QuicBuffer, 1, QUIC_SEND_FLAG_NONE, nullptr);
             break;
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-            MsQuic->ConnectionClose(Connection);
+            MsQuic->ConnectionClose(Connection); 
+            Connection = nullptr;
+            ConnectionHandled.set_value();
             break;
         }
 
         return QUIC_STATUS_SUCCESS;
     }
 
-    LoopbackClient(
-        bool& WasSuccessful
-        )
+    ConnectionClient(
+        bool& WasSuccessful,
+        int DataSize
+    )
     {
         WasSuccessful = false;
         if (QUIC_FAILED(MsQuicOpen(&MsQuic))) {
@@ -263,7 +242,7 @@ public:
         }
 
         // Create a registration
-        QUIC_REGISTRATION_CONFIG Config {
+        QUIC_REGISTRATION_CONFIG Config{
             "LoopbackTestClient",
             QUIC_EXECUTION_PROFILE::QUIC_EXECUTION_PROFILE_LOW_LATENCY
         };
@@ -276,62 +255,44 @@ public:
             return;
         }
 
+        BufferData = std::make_unique<uint8_t[]>(DataSize);
+        QuicBuffer.Buffer = BufferData.get();
+        QuicBuffer.Length = DataSize;
+
+        WasSuccessful = true;
+
+    }
+
+    bool
+        PerformTransaction(
+            int TimeoutSeconds
+        )
+    {
+        ConnectionHandled = std::promise<void>();
         // Create a connection
         if (QUIC_FAILED(MsQuic->ConnectionOpen(Session, [](HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event) {
-            return ((LoopbackClient*)Context)->ConnectionEvent(Connection, *Event);
+            return ((ConnectionClient*)Context)->ConnectionEvent(Connection, *Event);
             }, this, &Connection))) {
-            return;
+            return false;
         }
 
         const uint32_t CertificateValidationFlags = QUIC_CERTIFICATE_FLAG_DISABLE_CERT_VALIDATION;
         if (QUIC_FAILED(MsQuic->SetParam(
             Connection, QUIC_PARAM_LEVEL_CONNECTION, QUIC_PARAM_CONN_CERT_VALIDATION_FLAGS,
             sizeof(CertificateValidationFlags), &CertificateValidationFlags))) {
-            return;
+            return false;
         }
 
         if (QUIC_FAILED(MsQuic->ConnectionStart(Connection, AF_UNSPEC, "127.0.0.1", UdpPort))) {
-            return;
-        }
-        auto ConnectionFuture = ConnectionPromise.get_future();
-        if (ConnectionFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
-            return;
+            return false;
         }
 
-        if (QUIC_FAILED(MsQuic->StreamOpen(Connection, QUIC_STREAM_OPEN_FLAG_NONE, [](HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event) {
-            return ((LoopbackClient*)Context)->StreamEvent(Stream, *Event);
-            }, this, &Stream))) {
-            return;
-        }
-
-        if (QUIC_FAILED(MsQuic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE))) {
-            return;
-        }
-
-        WasSuccessful = true;
+        auto Future = ConnectionHandled.get_future();
+        return Future.wait_for(std::chrono::seconds(TimeoutSeconds)) == std::future_status::ready;
     }
 
-    bool
-    StartSend(
-        int BufferSize
-        )
-    {
-        BufferData = std::make_unique<uint8_t[]>(BufferSize);
-        QuicBuffer.Buffer = BufferData.get();
-        QuicBuffer.Length = BufferSize;
-        KeepSending = true;
-        return QUIC_SUCCEEDED(MsQuic->StreamSend(Stream, &QuicBuffer, 1, QUIC_SEND_FLAG_NONE, nullptr));
-    }
-
-    void 
-    StopSend(
-        )
-    {
-        KeepSending = false;
-    }
-
-    ~LoopbackClient(
-        )
+    ~ConnectionClient(
+    )
     {
         if (MsQuic) {
             if (Stream) {
@@ -352,55 +313,47 @@ public:
     }
 
 private:
+
     const QUIC_API_TABLE* MsQuic = nullptr;
     HQUIC Registration = nullptr;
     HQUIC Session = nullptr;
     HQUIC Connection = nullptr;
     HQUIC Stream = nullptr;
-    std::promise<void> ConnectionPromise;
     QUIC_BUFFER QuicBuffer{};
     std::unique_ptr<uint8_t[]> BufferData;
     std::atomic_bool KeepSending;
+    std::promise<void> ConnectionHandled;
 
 };
 
-class LoopbackTestsTestFixture : public ::testing::TestWithParam<int> {
+class ConnectionTestsTestFixture : public ::testing::TestWithParam<int> {
 
 };
 
-std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
+std::vector<std::pair<uint64_t, uint64_t>> ConnectionTimingData;
 
-TEST_P(LoopbackTestsTestFixture, LoopbackFixedBufferTest) {
+
+TEST_P(ConnectionTestsTestFixture, ConnectionFixedBufferTest) {
     bool WasSuccessful;
-    LoopbackServer server{ WasSuccessful };
+    ConnectionServer server{ WasSuccessful, GetParam() };
     ASSERT_TRUE(WasSuccessful);
 
-    LoopbackClient client{ WasSuccessful };
+    ConnectionClient client{ WasSuccessful, GetParam() };
     ASSERT_TRUE(WasSuccessful);
 
-    // Start send
-    bool SendSuccessful = client.StartSend(GetParam());
-    ASSERT_TRUE(SendSuccessful);
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    client.StopSend();
+    int TransactionCount = 0;
+    auto start = std::chrono::steady_clock::now();
 
-    bool WaitSuccessful = server.WaitForStreamFinish();
-    ASSERT_TRUE(WaitSuccessful);
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        bool SendSuccessful = client.PerformTransaction(10);
+        ASSERT_TRUE(SendSuccessful);
+        TransactionCount++;
+    }
 
-
-    auto DeltaTime = server.GetTimeDelta();
-    auto BytesReceived = server.GetTotalBytesReceived();
-
-    auto BytesReceivedPerNanosecond = BytesReceived / (double)DeltaTime.count();
-    auto BytesReceivedPerSecond = BytesReceivedPerNanosecond * 1000000000;
-
-    std::cout << "bytes per second: " << BytesReceivedPerSecond << std::endl;
-    std::cout << "bytes per nanosecond: " << BytesReceivedPerNanosecond << std::endl;
-    std::cout << "total bytes: " << BytesReceived << std::endl;
-    std::cout << "nanoseconds: " << DeltaTime.count() << std::endl;
-    LoopbackTimingData.emplace_back(std::make_pair((uint64_t)GetParam(), (uint64_t)BytesReceivedPerSecond));
+    std::cout << "connections handled: " << TransactionCount << std::endl;
+    ConnectionTimingData.emplace_back(std::make_pair((uint64_t)GetParam(), (uint64_t)TransactionCount));
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    LoopbackTests, LoopbackTestsTestFixture, ::testing::Values(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
+    ConnectionTests, ConnectionTestsTestFixture, ::testing::Values(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
 );
