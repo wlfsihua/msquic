@@ -365,10 +365,19 @@ private:
 };
 
 class LoopbackTestsTestFixture : public ::testing::TestWithParam<int> {
+public:
+    static void SetUpTestSuite() {
 
+    }
+
+    static void TearDownTestSuite() {
+
+    }
+
+    static std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
 };
 
-std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
+std::vector<std::pair<uint64_t, uint64_t>> LoopbackTestsTestFixture::LoopbackTimingData;
 
 TEST_P(LoopbackTestsTestFixture, LoopbackFixedBufferTest) {
     bool WasSuccessful;
@@ -394,13 +403,9 @@ TEST_P(LoopbackTestsTestFixture, LoopbackFixedBufferTest) {
     auto BytesReceivedPerNanosecond = BytesReceived / (double)DeltaTime.count();
     auto BytesReceivedPerSecond = BytesReceivedPerNanosecond * 1000000000;
 
-    std::cout << "bytes per second: " << BytesReceivedPerSecond << std::endl;
-    std::cout << "bytes per nanosecond: " << BytesReceivedPerNanosecond << std::endl;
-    std::cout << "total bytes: " << BytesReceived << std::endl;
-    std::cout << "nanoseconds: " << DeltaTime.count() << std::endl;
     LoopbackTimingData.emplace_back(std::make_pair((uint64_t)GetParam(), (uint64_t)BytesReceivedPerSecond));
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    LoopbackTests, LoopbackTestsTestFixture, ::testing::Values(2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
+    LoopbackTests, LoopbackTestsTestFixture, ::testing::Values(/*2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,*/ 65536)
 );

@@ -333,7 +333,7 @@ class ConnectionTestsTestFixture : public ::testing::TestWithParam<int> {
 std::vector<std::pair<uint64_t, uint64_t>> ConnectionTimingData;
 
 
-TEST_P(ConnectionTestsTestFixture, ConnectionFixedBufferTest) {
+TEST_P(ConnectionTestsTestFixture, DISABLED_ConnectionFixedBufferTest) {
     bool WasSuccessful;
     ConnectionServer server{ WasSuccessful, GetParam() };
     ASSERT_TRUE(WasSuccessful);
