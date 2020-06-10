@@ -14,6 +14,7 @@
 #include <chrono>
 #include <array>
 #include <vector>
+#include "TestResults.h"
 
 constexpr uint16_t UdpPort = 4567;
 const QUIC_BUFFER Alpn = { sizeof("loopback") - 1, (uint8_t*)"loopback" };
@@ -365,19 +366,23 @@ private:
 };
 
 class LoopbackTestsTestFixture : public ::testing::TestWithParam<int> {
-public:
-    static void SetUpTestSuite() {
-
-    }
-
-    static void TearDownTestSuite() {
-
-    }
-
-    static std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
 };
 
-std::vector<std::pair<uint64_t, uint64_t>> LoopbackTestsTestFixture::LoopbackTimingData;
+class LoopbackTestResult : public TestResult {
+public:
+    LoopbackTestResult(int size, uint64_t averageBytesReceived) 
+    {
+        FolderName = "loopback/fixed_buffer" + std::to_string(size);
+        results = std::to_string(averageBytesReceived);
+    }
+
+    std::string GetTestResultForPrinting() const override {
+        return results;
+    }
+
+private:
+    std::string results;
+};
 
 TEST_P(LoopbackTestsTestFixture, LoopbackFixedBufferTest) {
     bool WasSuccessful;
@@ -403,7 +408,7 @@ TEST_P(LoopbackTestsTestFixture, LoopbackFixedBufferTest) {
     auto BytesReceivedPerNanosecond = BytesReceived / (double)DeltaTime.count();
     auto BytesReceivedPerSecond = BytesReceivedPerNanosecond * 1000000000;
 
-    LoopbackTimingData.emplace_back(std::make_pair((uint64_t)GetParam(), (uint64_t)BytesReceivedPerSecond));
+    TestResults.emplace_back(std::make_shared<LoopbackTestResult>(GetParam(), (uint64_t)BytesReceivedPerSecond));
 }
 
 INSTANTIATE_TEST_SUITE_P(

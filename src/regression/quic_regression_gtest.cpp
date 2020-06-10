@@ -8,11 +8,14 @@
 #include "gtest/gtest.h"
 #include "msquichelper.h"
 
+#include "TestResults.h"
+
 #include <vector>
 #include <fstream>
+#include <iostream>
+#include <filesystem>
 
-extern std::vector<std::pair<uint64_t, uint64_t>> LoopbackTimingData;
-extern std::vector<std::pair<uint64_t, uint64_t>> ConnectionTimingData;
+std::vector<std::shared_ptr<TestResult>> TestResults;
 
 extern "C" void QuicTraceRundown(void) { }
 
@@ -25,17 +28,10 @@ int main(int argc, char* argv[]) {
     QuicPlatformSystemUnload();
 
     {
-        std::ofstream output{ "LoopbackResults.csv" };
-        for (auto&& d : LoopbackTimingData) {
-            output << d.first << ", " << d.second << std::endl;
+        std::ofstream output{ "Results.csv" };
+        std::cout << "Writing " << TestResults.size() << " Items to file: " << std::filesystem::current_path() << std::endl;
+        for (auto&& d : TestResults) {
+            output << d->FolderName << ", " << d->GetTestResultForPrinting() << std::endl;
         }
     }
-
-    {
-        std::ofstream output{ "ConnectionResults.csv" };
-        for (auto&& d : ConnectionTimingData) {
-            output << d.first << ", " << d.second << std::endl;
-        }
-    }
-
 }
