@@ -79,6 +79,7 @@ typedef struct QUIC_SINGLE_LIST_ENTRY {
 
 #define QuicListEntryValidate(Entry) \
     QUIC_DBG_ASSERT( \
+        (Entry != NULL) && \
         (((Entry->Flink)->Blink) == Entry) && \
         (((Entry->Blink)->Flink) == Entry))
 
@@ -206,6 +207,8 @@ QuicListMoveItems(
         //
         QuicListInitializeHead(Source);
     }
+    QuicListEntryValidate(Source);
+    QuicListEntryValidate(Destination);
 }
 
 FORCEINLINE
