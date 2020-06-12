@@ -729,6 +729,8 @@ Arguments:
         HashTable->NonEmptyBuckets++;
     }
 
+    QUIC_DBG_ASSERT(Entry->Linkage.Flink != NULL 
+        && Entry->Linkage.Blink != NULL);
     QuicListInsertHead(ContextPtr->PrevLinkage, &Entry->Linkage);
 }
 
@@ -987,6 +989,8 @@ Arguments:
         HashTable->NonEmptyBuckets++;
     }
 
+    QUIC_DBG_ASSERT(Enumerator->HashEntry.Linkage.Flink != NULL 
+        && Enumerator->HashEntry.Linkage.Blink != NULL);
     QuicListInsertHead(LocalContext.ChainHead, &(Enumerator->HashEntry.Linkage));
     Enumerator->BucketIndex = 0;
     Enumerator->ChainHead = LocalContext.ChainHead;
@@ -1079,6 +1083,8 @@ Return Value:
                 Enumerator->BucketIndex = i;
                 Enumerator->ChainHead = ChainHead;
 
+                QUIC_DBG_ASSERT(Enumerator->HashEntry.Linkage.Flink != NULL 
+                    && Enumerator->HashEntry.Linkage.Blink != NULL);
                 QuicListInsertHead(NextEntry, &(Enumerator->HashEntry.Linkage));
                 return NextHashEntry;
             }
