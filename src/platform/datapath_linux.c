@@ -9,17 +9,32 @@ Abstract:
 
 Environment:
 
-    Linux
+    Linux and Darwin
 
 --*/
 
+#if defined(QUIC_PLATFORM_DARWIN)
+#define __APPLE_USE_RFC_3542 1
+// See netinet6/in6.h:46 for an explanation
+#endif // QUIC_PLATFORM_DARWIN
+
 #define _GNU_SOURCE
 #include "platform_internal.h"
+
+#if defined(QUIC_PLATFORM_LINUX)
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <inttypes.h>
 #include <linux/in6.h>
 #include <arpa/inet.h>
+#elif defined(QUIC_PLATFORM_DARWIN)
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/sysctl.h>
+#include <sys/event.h>
+#include <sys/time.h>
+#endif // QUIC_PLATFORM_DARWIN
+
 #include "quic_platform_dispatch.h"
 
 QUIC_STATIC_ASSERT((SIZEOF_STRUCT_MEMBER(QUIC_BUFFER, Length) <= sizeof(size_t)), "(sizeof(QUIC_BUFFER.Length) == sizeof(size_t) must be TRUE.");
@@ -131,6 +146,8 @@ typedef struct QUIC_SOCKET_CONTEXT {
     //
     int SocketFd;
 
+#if defined(QUIC_PLATFORM_LINUX)
+
     //
     // The cleanup event FD used by this socket context.
     //
@@ -142,6 +159,8 @@ typedef struct QUIC_SOCKET_CONTEXT {
 #define QUIC_SOCK_EVENT_CLEANUP 0
 #define QUIC_SOCK_EVENT_SOCKET  1
     uint8_t EventContexts[2];
+
+#endif // QUIC_PLATFORM_LINUX
 
     //
     // Indicates if sends are waiting for the socket to be write ready.
@@ -237,6 +256,7 @@ typedef struct QUIC_DATAPATH_PROC_CONTEXT {
     //
     QUIC_DATAPATH* Datapath;
 
+#if defined(QUIC_PLATFORM_LINUX)
     //
     // The Epoll FD for this proc context.
     //
@@ -247,6 +267,15 @@ typedef struct QUIC_DATAPATH_PROC_CONTEXT {
     //
     int EventFd;
 
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+    //
+    // The Kqueue FD for this proc context.
+    //
+    int KqueueFd;
+
+#endif // QUIC_PLATFORM_DARWIN
+
     //
     // The index of the context in the datapath's array.
     //
@@ -254,8 +283,9 @@ typedef struct QUIC_DATAPATH_PROC_CONTEXT {
 
     //
     // The epoll wait thread.
+    // Currently epoll & kqueue thread; 
     //
-    QUIC_THREAD EpollWaitThread;
+    QUIC_THREAD WorkerThread;
 
     //
     // Pool of receive packet contexts and buffers to be shared by all sockets
@@ -363,6 +393,8 @@ QuicProcessorContextInitialize(
         sizeof(QUIC_DATAPATH_SEND_CONTEXT),
         &ProcContext->SendContextPool);
 
+#if defined(QUIC_PLATFORM_LINUX)
+
     EpollFd = epoll_create1(EPOLL_CLOEXEC);
     if (EpollFd == INVALID_SOCKET_FD) {
         Status = errno;
@@ -409,6 +441,25 @@ QuicProcessorContextInitialize(
     ProcContext->EpollFd = EpollFd;
     ProcContext->EventFd = EventFd;
 
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+    int KqueueFd = kqueue();
+
+    if (KqueueFd == INVALID_SOCKET_FD) {
+        Status = errno;
+        QuicTraceEvent(
+            LibraryErrorStatus,
+            "[ lib] ERROR, %u, %s.",
+            Status,
+            "kqueue() failed");
+        goto Exit;
+    }
+
+    ProcContext->Datapath = Datapath;
+    ProcContext->KqueueFd = KqueueFd;
+
+#endif // QUIC_PLATFORM_DARWIN
+
     //
     // Starting the thread must be done after the rest of the ProcContext
     // members have been initialized. Because the thread start routine accesses
@@ -423,7 +474,7 @@ QuicProcessorContextInitialize(
         ProcContext
     };
 
-    Status = QuicThreadCreate(&ThreadConfig, &ProcContext->EpollWaitThread);
+    Status = QuicThreadCreate(&ThreadConfig, &ProcContext->WorkerThread);
     if (QUIC_FAILED(Status)) {
         QuicTraceEvent(
             LibraryErrorStatus,
@@ -436,6 +487,8 @@ QuicProcessorContextInitialize(
 Exit:
 
     if (QUIC_FAILED(Status)) {
+
+#if defined(QUIC_PLATFORM_LINUX)
         if (EventFdAdded) {
             epoll_ctl(EpollFd, EPOLL_CTL_DEL, EventFd, NULL);
         }
@@ -445,6 +498,15 @@ Exit:
         if (EpollFd != INVALID_SOCKET_FD) {
             close(EpollFd);
         }
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+        if (KqueueFd != INVALID_SOCKET_FD) {
+            close(KqueueFd);
+        }
+
+#endif // QUIC_PLATFORM_DARWIN
+
         QuicPoolUninitialize(&ProcContext->RecvBlockPool);
         QuicPoolUninitialize(&ProcContext->SendBufferPool);
         QuicPoolUninitialize(&ProcContext->SendContextPool);
@@ -458,14 +520,24 @@ QuicProcessorContextUninitialize(
     _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext
     )
 {
+
+#if defined(QUIC_PLATFORM_LINUX)
+
     const eventfd_t Value = 1;
     eventfd_write(ProcContext->EventFd, Value);
-    QuicThreadWait(&ProcContext->EpollWaitThread);
-    QuicThreadDelete(&ProcContext->EpollWaitThread);
+    QuicThreadWait(&ProcContext->WorkerThread);
+    QuicThreadDelete(&ProcContext->WorkerThread);
 
     epoll_ctl(ProcContext->EpollFd, EPOLL_CTL_DEL, ProcContext->EventFd, NULL);
     close(ProcContext->EventFd);
     close(ProcContext->EpollFd);
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+    // TODO: wait till the worker thread shuts down
+    close(ProcContext->KqueueFd);
+    
+#endif
 
     QuicPoolUninitialize(&ProcContext->RecvBlockPool);
     QuicPoolUninitialize(&ProcContext->SendBufferPool);
@@ -515,7 +587,11 @@ QuicDataPathInitialize(
     Datapath->RecvHandler = RecvCallback;
     Datapath->UnreachHandler = UnreachableCallback;
     Datapath->ClientRecvContextLength = ClientRecvContextLength;
+#if defined(QUIC_PLATFORM_LINUX)
     Datapath->ProcCount = QuicProcMaxCount();
+#elif defined(QUIC_PLATFORM_DARWIN)
+    Datapath->ProcCount = 1;
+#endif 
     Datapath->MaxSendBatchSize = QUIC_MAX_BATCH_SEND;
     QuicRundownInitialize(&Datapath->BindingsRundown);
 
@@ -734,6 +810,8 @@ Exit:
 // Socket context interface. It abstracts a (generally per-processor) UDP socket
 // and the corresponding logic/functionality like send and receive processing.
 //
+
+#if defined(QUIC_PLATFORM_LINUX)
 
 QUIC_STATUS
 QuicSocketContextInitialize(
@@ -1045,16 +1123,228 @@ Exit:
     return Status;
 }
 
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+QUIC_STATUS
+QuicSocketContextInitialize(
+    _Inout_ QUIC_SOCKET_CONTEXT* SocketContext,
+    _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext,
+    _In_ const QUIC_ADDR* LocalAddress,
+    _In_ const QUIC_ADDR* RemoteAddress
+    )
+{
+    QUIC_STATUS Status = QUIC_STATUS_SUCCESS;
+    int Result = 0;
+    int Option = 0;
+    QUIC_ADDR MappedRemoteAddress = { };
+    socklen_t AssignedLocalAddressLength = 0;
+
+    QUIC_DATAPATH_BINDING* Binding = SocketContext->Binding;
+
+    //
+    // Create datagram socket.
+    //
+
+    sa_family_t af_family = Binding->LocalAddress.Ip.sa_family;
+
+    SocketContext->SocketFd = socket(af_family, SOCK_DGRAM, 0);
+
+    if (SocketContext->SocketFd == INVALID_SOCKET_FD) {
+        Status = errno;
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[ udp][%p] ERROR, %u, %s.",
+            Binding,
+            Status,
+            "socket failed");
+        goto Exit;
+    }
+
+    socklen_t AddrSize = 0;
+
+    if (af_family == AF_INET) {
+        AddrSize = sizeof(struct sockaddr_in);
+
+        Option = TRUE;
+        Result =
+            setsockopt(SocketContext->SocketFd, IPPROTO_IP, IP_PKTINFO, &Option, sizeof(Option));
+        if (Result == SOCKET_ERROR) {
+            Status = errno;
+            QuicTraceEvent(
+                    DatapathErrorStatus,
+                    "[ udp][%p] ERROR, %u, %s.",
+                    Binding,
+                    Status,
+                    "setsockopt(IP_PKTINFO) failed");
+            goto Exit;
+        }
+    }
+    else {
+        AddrSize = sizeof(struct sockaddr_in6);
+
+        Option = TRUE;
+        Result = 
+            setsockopt(SocketContext->SocketFd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &Option, sizeof(Option));
+        Option = TRUE;
+        Result =
+            setsockopt(SocketContext->SocketFd, IPPROTO_IPV6, IPV6_PKTINFO, &Option, sizeof(Option));
+    }
+
+    //
+    // The socket is shared by multiple QUIC endpoints, so increase the receive
+    // buffer size.
+    //
+    Option = INT32_MAX / 400;
+    // This is the largest value that actually works. I don't know why.
+    Result =
+        setsockopt(
+            SocketContext->SocketFd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            (const void*)&Option,
+            sizeof(Option));
+    if (Result == SOCKET_ERROR) {
+        Status = errno;
+        QuicTraceEvent(
+                DatapathErrorStatus,
+                "[ udp][%p] ERROR, %u, %s.",
+                Binding,
+                Status,
+                "setsockopt(SO_RCVBUF) failed");
+        goto Exit;
+    }
+
+    //
+    // The port is shared across processors.
+    //
+    Option = TRUE;
+    Result =
+        setsockopt(
+            SocketContext->SocketFd,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            (const void*)&Option,
+            sizeof(Option));
+    if (Result == SOCKET_ERROR) {
+        Status = errno;
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[ udp][%p] ERROR, %u, %s.",
+            Binding,
+            Status,
+            "setsockopt(SO_REUSEADDR) failed");
+        goto Exit;
+    }
+
+    Result =
+        bind(
+            SocketContext->SocketFd,
+            (const struct sockaddr *)&Binding->LocalAddress,
+            AddrSize);
+    
+    if (Result == SOCKET_ERROR) {
+        Status = errno;
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[ udp][%p] ERROR, %u, %s.",
+            Binding,
+            Status,
+            "bind() failed");
+        goto Exit;
+    }
+
+    if (RemoteAddress != NULL) {
+        // XXX: Don't map v4-to-v6 addresses for now.
+        // QuicZeroMemory(&MappedRemoteAddress, sizeof(MappedRemoteAddress));
+        // QuicConvertToMappedV6(RemoteAddress, &MappedRemoteAddress);
+
+        Result =
+            connect(
+                SocketContext->SocketFd,
+                (const struct sockaddr *)RemoteAddress,
+                AddrSize);
+
+        if (Result == SOCKET_ERROR) {
+            __asm__("int3");
+            Status = errno;
+            QuicTraceEvent(
+                DatapathErrorStatus,
+                "[ udp][%p] ERROR, %u, %s.",
+                Binding,
+                Status,
+                "connect failed");
+            goto Exit;
+        }
+    }
+
+    //
+    // If no specific local port was indicated, then the stack just
+    // assigned this socket a port. We need to query it and use it for
+    // all the other sockets we are going to create.
+    //
+    AssignedLocalAddressLength = sizeof(struct sockaddr);
+    Result =
+        getsockname(
+            SocketContext->SocketFd,
+            (struct sockaddr *)&Binding->LocalAddress,
+            &AssignedLocalAddressLength);
+    if (Result == SOCKET_ERROR) {
+        Status = errno;
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[ udp][%p] ERROR, %u, %s.",
+            Binding,
+            Status,
+            "getsockname failed");
+        goto Exit;
+    }
+
+    if (LocalAddress && LocalAddress->Ipv4.sin_port != 0) {
+        QUIC_DBG_ASSERT(LocalAddress->Ipv4.sin_port == Binding->LocalAddress.Ipv4.sin_port);
+    }
+
+Exit:
+
+    if (QUIC_FAILED(Status)) {
+        close(SocketContext->SocketFd);
+        SocketContext->SocketFd = INVALID_SOCKET_FD;
+    }
+
+    return Status;
+}
+
+#endif // QUIC_PLATFORM_DARWIN
+
 void
 QuicSocketContextUninitialize(
     _In_ QUIC_SOCKET_CONTEXT* SocketContext,
     _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext
     )
 {
+
+#if defined(QUIC_PLATFORM_LINUX)
+
     epoll_ctl(ProcContext->EpollFd, EPOLL_CTL_DEL, SocketContext->SocketFd, NULL);
 
     const eventfd_t Value = 1;
     eventfd_write(SocketContext->CleanupFd, Value);
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+ 
+    // XXX: Documentation says shutdown(Sockfd, SHUT_RD) is enough to wake up the kqueue
+    // However, this seems to only happen after we've recieved some data..
+    // So we use EVFILT_USER to indicate that we want to destroy this socket
+    // context, and to wake up the worker thread. Perhaps we should pass an
+    // explicit CLOSE message to the worker thread, but for now, any
+    // EVFILT_USER event is a shutdown.
+    // shutdown(SocketContext->SocketFd, SHUT_RDWR);
+    
+    struct kevent EvSet[2] = { };
+    EV_SET(&EvSet[0], SocketContext->SocketFd, EVFILT_USER, EV_ADD | EV_CLEAR, NOTE_TRIGGER, 0, (void *)SocketContext);
+    EV_SET(&EvSet[1], SocketContext->SocketFd, EVFILT_READ, EV_DELETE, 0, 0, (void *)SocketContext);
+    kevent(ProcContext->KqueueFd, EvSet, 2, NULL, 0, NULL);
+
+#endif // QUIC_PLATFORM_DARWIN
 }
 
 void
@@ -1075,10 +1365,18 @@ QuicSocketContextUninitializeComplete(
                 PendingSendLinkage));
     }
 
+#if defined(QUIC_PLATFORM_LINUX)
+
     epoll_ctl(ProcContext->EpollFd, EPOLL_CTL_DEL, SocketContext->SocketFd, NULL);
     epoll_ctl(ProcContext->EpollFd, EPOLL_CTL_DEL, SocketContext->CleanupFd, NULL);
     close(SocketContext->CleanupFd);
     close(SocketContext->SocketFd);
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+    close(SocketContext->SocketFd);
+
+#endif // QUIC_PLATFORM_DARWIN 
 
     QuicRundownRelease(&SocketContext->Binding->Rundown);
 }
@@ -1089,10 +1387,17 @@ QuicSocketContextPrepareReceive(
     )
 {
     if (SocketContext->CurrentRecvBlock == NULL) {
+#if defined(QUIC_PLATFORM_LINUX)
         SocketContext->CurrentRecvBlock =
             QuicDataPathAllocRecvBlock(
                 SocketContext->Binding->Datapath,
                 QuicProcCurrentNumber());
+#elif defined(QUIC_PLATFORM_DARWIN)
+        SocketContext->CurrentRecvBlock =
+            QuicDataPathAllocRecvBlock(
+                SocketContext->Binding->Datapath,
+                0);
+#endif
         if (SocketContext->CurrentRecvBlock == NULL) {
             QuicTraceEvent(
                 AllocFailure,
@@ -1120,6 +1425,8 @@ QuicSocketContextPrepareReceive(
 
     return QUIC_STATUS_SUCCESS;
 }
+
+#if defined(QUIC_PLATFORM_LINUX)
 
 QUIC_STATUS
 QuicSocketContextStartReceive(
@@ -1166,6 +1473,46 @@ Error:
     return Status;
 }
 
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+QUIC_STATUS
+QuicSocketContextStartReceive(
+    _In_ QUIC_SOCKET_CONTEXT* SocketContext,
+    _In_ int KqueueFd
+    )
+{
+    QUIC_STATUS Status = QuicSocketContextPrepareReceive(SocketContext);
+    if (QUIC_FAILED(Status)) {
+        goto Error;
+    }
+
+    struct kevent evSet = { };
+    EV_SET(&evSet, SocketContext->SocketFd, EVFILT_READ, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, (void *)SocketContext);
+    if (kevent(KqueueFd, &evSet, 1, NULL, 0, NULL) < 0)  {
+        QUIC_DBG_ASSERT(0);
+        // Should be QUIC_STATUS_KQUEUE_ERROR
+        QuicTraceEvent(
+            DatapathErrorStatus,
+            "[ udp][%p] ERROR, %u, %s.",
+            SocketContext->Binding,
+            Status,
+            "kevent(..., sockfd EV_ADD, ...) failed");
+        Status = QUIC_STATUS_INTERNAL_ERROR;
+        goto Error;
+    }
+
+Error:
+
+    if (QUIC_FAILED(Status)) {
+        close(SocketContext->SocketFd);
+        SocketContext->SocketFd = INVALID_SOCKET_FD;
+    }
+
+    return Status;
+}
+
+#endif // QUIC_PLATFORM_DARWIN
+
 void
 QuicSocketContextRecvComplete(
     _In_ QUIC_SOCKET_CONTEXT* SocketContext,
@@ -1182,7 +1529,11 @@ QuicSocketContextRecvComplete(
     BOOLEAN FoundLocalAddr = FALSE;
     QUIC_ADDR* LocalAddr = &RecvPacket->Tuple->LocalAddress;
     QUIC_ADDR* RemoteAddr = &RecvPacket->Tuple->RemoteAddress;
+
+    // Currently aren't using dual-stack socket on darwin. Don't map v4.
+#if defined(QUIC_PLATFORM_LINUX)
     QuicConvertFromMappedV6(RemoteAddr, RemoteAddr);
+#endif
 
     struct cmsghdr *CMsg;
     for (CMsg = CMSG_FIRSTHDR(&SocketContext->RecvMsgHdr);
@@ -1195,7 +1546,10 @@ QuicSocketContextRecvComplete(
             LocalAddr->Ip.sa_family = AF_INET6;
             LocalAddr->Ipv6.sin6_addr = PktInfo6->ipi6_addr;
             LocalAddr->Ipv6.sin6_port = SocketContext->Binding->LocalAddress.Ipv6.sin6_port;
+            // Currently aren't using dual-stack socket on darwin. Don't map v4.
+#if defined(QUIC_PLATFORM_LINUX)
             QuicConvertFromMappedV6(LocalAddr, LocalAddr);
+#endif
 
             LocalAddr->Ipv6.sin6_scope_id = PktInfo6->ipi6_ifindex;
             FoundLocalAddr = TRUE;
@@ -1257,6 +1611,8 @@ QuicSocketContextPendSend(
 {
     if (!SocketContext->SendWaiting) {
 
+#if defined(QUIC_PLATFORM_LINUX)
+
         struct epoll_event SockFdEpEvt = {
             .events = EPOLLIN | EPOLLOUT | EPOLLET,
             .data = {
@@ -1279,6 +1635,33 @@ QuicSocketContextPendSend(
                 "epoll_ctl failed");
             return errno;
         }
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+        // We have to enable EVFILT_WRITE notifications here, since there's
+        // basically nowhere else to try and empty the send queue except the
+        // worker thread, and there's the possibility that the worker thread
+        // won't wake up fast enough.
+
+        // We can try to EV_ONESHOT this, s.t. we only get woken up for this
+        // once, attempt to empty the sendqueue, and if it fails, then add it
+        // again as oneshot.
+        //
+        // The alternate option is to add it normally, so we constantly get
+        // woken up for it, and after N missed writes (i.e. the kernel had room
+        // and we had nothing to write), we can turn it off.
+        //
+        // Or we could do some mix of both, and try to recognize how often
+        // we're missing writes or re-pending writes.
+        
+        // For now, we'll do the most naïve thing, and oneshot it everytime we
+        // hit this function.
+        
+        struct kevent Event = { };
+        EV_SET(&Event, SocketContext->SocketFd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, (void *)SocketContext);
+        kevent(ProcContext->KqueueFd, &Event, 1, NULL, 0, NULL);
+
+#endif // QUIC_PLATFORM_DARWIN
 
         if (LocalAddress != NULL) {
             QuicCopyMemory(
@@ -1319,7 +1702,7 @@ QuicSocketContextPendSend(
 }
 
 QUIC_STATUS
-QuicSocketContextSendComplete(
+QuicSocketContextSendPending(
     _In_ QUIC_SOCKET_CONTEXT* SocketContext,
     _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext
     )
@@ -1327,6 +1710,8 @@ QuicSocketContextSendComplete(
     QUIC_STATUS Status = QUIC_STATUS_SUCCESS;
 
     if (SocketContext->SendWaiting) {
+
+#if defined(QUIC_PLATFORM_LINUX)
 
         struct epoll_event SockFdEpEvt = {
             .events = EPOLLIN | EPOLLET,
@@ -1352,10 +1737,16 @@ QuicSocketContextSendComplete(
             goto Exit;
         }
 
+#endif // QUIC_PLATFORM_LINUX
+
         SocketContext->SendWaiting = FALSE;
     }
 
     while (!QuicListIsEmpty(&SocketContext->PendingSendContextHead)) {
+        // This is .. funky?
+        // It seems possible that this will queue up the send again and we'll
+        // just spin until the kernel accepts it...
+ 
         QUIC_DATAPATH_SEND_CONTEXT* SendContext =
             QUIC_CONTAINING_RECORD(
                 QuicListRemoveHead(&SocketContext->PendingSendContextHead),
@@ -1382,8 +1773,10 @@ Exit:
     return Status;
 }
 
+#if defined(QUIC_PLATFORM_LINUX)
+
 void
-QuicSocketContextProcessEvents(
+QuicSocketContextProcessEvent(
     _In_ void* EventPtr,
     _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext,
     _In_ int Events
@@ -1470,9 +1863,40 @@ QuicSocketContextProcessEvents(
     }
 
     if (EPOLLOUT & Events) {
-        QuicSocketContextSendComplete(SocketContext, ProcContext);
+        QuicSocketContextSendPending(SocketContext, ProcContext);
     }
 }
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+void
+QuicSocketContextProcessEvent(
+    _In_ QUIC_DATAPATH_PROC_CONTEXT* ProcContext,
+    _In_ struct kevent *Event
+    )
+{
+    QUIC_DBG_ASSERT(Event->filter & (EVFILT_READ | EVFILT_WRITE | EVFILT_USER));
+
+    QUIC_SOCKET_CONTEXT *SocketContext = (QUIC_SOCKET_CONTEXT *)Event->udata;
+
+    if (Event->filter == EVFILT_USER || Event->flags & EV_EOF) {
+        QUIC_DBG_ASSERT(SocketContext->Binding->Shutdown);
+        QuicSocketContextUninitializeComplete(SocketContext, ProcContext);
+        return;
+    }
+
+    else if (Event->filter == EVFILT_READ) {
+        int Ret = recvmsg(SocketContext->SocketFd, &SocketContext->RecvMsgHdr, 0);
+        if (Ret != -1)
+            QuicSocketContextRecvComplete(SocketContext, ProcContext, Ret);
+    }
+
+    else if (Event->filter == EVFILT_WRITE) {
+        QuicSocketContextSendPending(SocketContext, ProcContext);
+    }
+}
+
+#endif // QUIC_PLATFORM_DARWIN
 
 //
 // Datapath binding interface.
@@ -1525,11 +1949,28 @@ QuicDataPathBindingCreate(
     Binding->ClientContext = RecvCallbackContext;
     Binding->Mtu = QUIC_MAX_MTU;
     QuicRundownInitialize(&Binding->Rundown);
+#if defined(QUIC_PLATFORM_LINUX)
     if (LocalAddress) {
         QuicConvertToMappedV6(LocalAddress, &Binding->LocalAddress);
     } else {
         Binding->LocalAddress.Ip.sa_family = AF_INET6;
     }
+#elif defined(QUIC_PLATFORM_DARWIN)
+    if (LocalAddress) {
+        memcpy(&Binding->LocalAddress, LocalAddress, sizeof(QUIC_ADDR));
+        // QuicConvertToMappedV6(LocalAddress, &Binding->LocalAddress);
+    } else if (RemoteAddress) {
+        // We have no local address, but we have a remote address. 
+        // Let's match up AF types with the remote.
+        Binding->LocalAddress.Ip.sa_family = RemoteAddress->Ip.sa_family;
+    } else {
+        // This indicates likely that the application wants a listener with a random port.
+        // Since we can't dual-stack socket, fall back to AF_INET6
+        Binding->LocalAddress.Ip.sa_family = AF_INET6;
+    }
+
+#endif // QUIC_PLATFORM_DARWIN
+
     for (uint32_t i = 0; i < SocketCount; i++) {
         Binding->SocketContexts[i].Binding = Binding;
         Binding->SocketContexts[i].SocketFd = INVALID_SOCKET_FD;
@@ -1553,8 +1994,10 @@ QuicDataPathBindingCreate(
         }
     }
 
+#if defined(QUIC_PLATFORM_LINUX)
     QuicConvertFromMappedV6(&Binding->LocalAddress, &Binding->LocalAddress);
     Binding->LocalAddress.Ipv6.sin6_scope_id = 0;
+#endif // QUIC_PLATFORM_LINUX
 
     if (RemoteAddress != NULL) {
         Binding->RemoteAddress = *RemoteAddress;
@@ -1569,10 +2012,18 @@ QuicDataPathBindingCreate(
     *NewBinding = Binding;
 
     for (uint32_t i = 0; i < Binding->Datapath->ProcCount; i++) {
+#if defined(QUIC_PLATFORM_LINUX)
         Status =
             QuicSocketContextStartReceive(
                 &Binding->SocketContexts[i],
                 Datapath->ProcContexts[i].EpollFd);
+#elif defined(QUIC_PLATFORM_DARWIN)
+        Status =
+            QuicSocketContextStartReceive(
+                &Binding->SocketContexts[i],
+                Datapath->ProcContexts[i].KqueueFd);
+#endif // QUIC_PLATFORM_DARWIN
+
         if (QUIC_FAILED(Status)) {
             goto Exit;
         }
@@ -1774,8 +2225,14 @@ QuicDataPathBindingAllocSendContext(
     UNREFERENCED_PARAMETER(MaxPacketSize);
     QUIC_DBG_ASSERT(Binding != NULL);
 
+#if defined(QUIC_PLATFORM_LINUX)
     QUIC_DATAPATH_PROC_CONTEXT* ProcContext =
         &Binding->Datapath->ProcContexts[QuicProcCurrentNumber()];
+#elif defined(QUIC_PLATFORM_DARWIN)
+    QUIC_DATAPATH_PROC_CONTEXT* ProcContext =
+        &Binding->Datapath->ProcContexts[0];
+#endif
+
     QUIC_DATAPATH_SEND_CONTEXT* SendContext =
         QuicPoolAlloc(&ProcContext->SendContextPool);
     if (SendContext == NULL) {
@@ -1894,25 +2351,31 @@ QuicDataPathBindingSend(
     _In_ QUIC_DATAPATH_SEND_CONTEXT* SendContext
     )
 {
+
     QUIC_STATUS Status = QUIC_STATUS_SUCCESS;
     QUIC_SOCKET_CONTEXT* SocketContext = NULL;
     QUIC_DATAPATH_PROC_CONTEXT* ProcContext = NULL;
     ssize_t SentByteCount = 0;
     size_t i = 0;
     socklen_t RemoteAddrLen = 0;
-    QUIC_ADDR MappedRemoteAddress = {0};
+    QUIC_ADDR MappedRemoteAddress = { };
     struct cmsghdr *CMsg = NULL;
     struct in_pktinfo *PktInfo = NULL;
     struct in6_pktinfo *PktInfo6 = NULL;
     BOOLEAN SendPending = FALSE;
 
-    static_assert(CMSG_SPACE(sizeof(struct in6_pktinfo)) >= CMSG_SPACE(sizeof(struct in_pktinfo)), "sizeof(struct in6_pktinfo) >= sizeof(struct in_pktinfo) failed");
-    char ControlBuffer[CMSG_SPACE(sizeof(struct in6_pktinfo))] = {0};
+    const size_t ControlSize = MAX(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo));
+    char ControlBuffer[CMSG_SPACE(ControlSize)] = {0};
 
     QUIC_DBG_ASSERT(Binding != NULL && RemoteAddress != NULL && SendContext != NULL);
 
+#if defined(QUIC_PLATFORM_LINUX)
     SocketContext = &Binding->SocketContexts[QuicProcCurrentNumber()];
     ProcContext = &Binding->Datapath->ProcContexts[QuicProcCurrentNumber()];
+#elif defined(QUIC_PLATFORM_DARWIN)
+    SocketContext = &Binding->SocketContexts[0];
+    ProcContext = &Binding->Datapath->ProcContexts[0];
+#endif
 
     RemoteAddrLen =
         (AF_INET == RemoteAddress->Ip.sa_family) ?
@@ -1935,6 +2398,7 @@ QuicDataPathBindingSend(
                 LOG_ADDR_LEN(*RemoteAddress),
                 (uint8_t*)RemoteAddress);
 
+#if defined(QUIC_PLATFORM_LINUX)
             SentByteCount =
                 sendto(
                     SocketContext->SocketFd,
@@ -1943,9 +2407,23 @@ QuicDataPathBindingSend(
                     0,
                     (struct sockaddr *)RemoteAddress,
                     RemoteAddrLen);
+#elif defined(QUIC_PLATFORM_DARWIN)
+            // Specifying an address on a connected-socket is an error on darwin.
+            // XXX: as a server, determine if the socket is connected. I don't
+            // know how to do this since this is partially for the multipath
+            // code..
+            SentByteCount =
+                sendto(
+                    SocketContext->SocketFd,
+                    SendContext->Buffers[i].Buffer,
+                    SendContext->Buffers[i].Length,
+                    0,
+                    NULL,
+                    0);
+#endif
 
             if (SentByteCount < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
                     Status =
                         QuicSocketContextPendSend(
                             SocketContext,
@@ -1953,6 +2431,7 @@ QuicDataPathBindingSend(
                             ProcContext,
                             LocalAddress,
                             RemoteAddress);
+
                     if (QUIC_FAILED(Status)) {
                         goto Exit;
                     }
@@ -2005,10 +2484,12 @@ QuicDataPathBindingSend(
             (uint8_t*)RemoteAddress,
             (uint8_t*)LocalAddress);
 
+#if defined(QUIC_PLATFORM_LINUX)
         //
         // Map V4 address to dual-stack socket format.
         //
         QuicConvertToMappedV6(RemoteAddress, &MappedRemoteAddress);
+#endif // QUIC_PLATFORM_LINUX
 
         struct msghdr Mhdr = {
             .msg_name = &MappedRemoteAddress,
@@ -2050,7 +2531,7 @@ QuicDataPathBindingSend(
         SentByteCount = sendmsg(SocketContext->SocketFd, &Mhdr, 0);
 
         if (SentByteCount < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
                 Status =
                     QuicSocketContextPendSend(
                         SocketContext,
@@ -2182,6 +2663,8 @@ QuicDataPathBindingGetLocalMtu(
     })
 #endif
 
+#if defined(QUIC_PLATFORM_LINUX)
+
 void*
 QuicDataPathWorkerThread(
     _In_ void* Context
@@ -2218,7 +2701,7 @@ QuicDataPathWorkerThread(
                 break;
             }
 
-            QuicSocketContextProcessEvents(
+            QuicSocketContextProcessEvent(
                 EpollEvents[i].data.ptr,
                 ProcContext,
                 EpollEvents[i].events);
@@ -2232,6 +2715,34 @@ QuicDataPathWorkerThread(
 
     return NO_ERROR;
 }
+
+#elif defined(QUIC_PLATFORM_DARWIN)
+
+void*
+QuicDataPathWorkerThread(
+    _In_ void* Context
+    )
+{
+    QUIC_DATAPATH_PROC_CONTEXT* ProcContext = (QUIC_DATAPATH_PROC_CONTEXT*)Context;
+    QUIC_DBG_ASSERT(ProcContext != NULL && ProcContext->Datapath != NULL);
+    struct kevent EventList[32];
+    int Kqueue = ProcContext->KqueueFd; 
+
+    while (TRUE) {
+        int EventCount = kevent(Kqueue, NULL, 0, EventList, 32, NULL);
+
+        if (ProcContext->Datapath->Shutdown) break;
+
+        QUIC_DBG_ASSERT(EventCount > 0);
+        
+        for (int i = 0; i < EventCount; i++) {
+            QuicSocketContextProcessEvent(ProcContext, &EventList[i]);
+        }
+    }
+
+    return NO_ERROR;
+}
+#endif // QUIC_PLATFORM_DARWIN
 
 BOOLEAN
 QuicDataPathBindingIsSendContextFull(

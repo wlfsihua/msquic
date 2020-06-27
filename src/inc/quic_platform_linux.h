@@ -18,7 +18,9 @@ Environment:
 #endif
 
 #ifndef QUIC_PLATFORM_LINUX
+#ifndef QUIC_PLATFORM_DARWIN
 #error "Incorrectly including Linux Platform Header from non-Linux platfrom"
+#endif
 #endif
 
 #ifndef _PLATFORM_LINUX_
