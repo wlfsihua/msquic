@@ -26,7 +26,7 @@ Environment:
 
 #define QUIC_MAX_LOG_MSG_LEN        1024 // Bytes
 
-#ifdef QUIC_PLATFORM_DISPATCH_TABLE
+#if QUIC_PLATFORM_DISPATCH_TABLE
 QUIC_PLATFORM_DISPATCH* PlatDispatch = NULL;
 #else
 int RandomFd; // Used for reading random numbers.
@@ -332,7 +332,7 @@ QuicEventInitialize(
 
     QUIC_FRE_ASSERT(pthread_mutex_init(&EventObj->Mutex, NULL) == 0);
     QUIC_FRE_ASSERT(pthread_condattr_init(&Attr) == 0);
-#if QUIC_PLATFORM_LINUX
+#if defined(QUIC_PLATFORM_LINUX)
     QUIC_FRE_ASSERT(pthread_condattr_setclock(&Attr, CLOCK_MONOTONIC) == 0);
 #endif // QUIC_PLATFORM_LINUX
     QUIC_FRE_ASSERT(pthread_cond_init(&EventObj->Cond, &Attr) == 0);
@@ -499,9 +499,9 @@ QuicGetAbsoluteTime(
 
     QuicZeroMemory(Time, sizeof(struct timespec));
 
-#if QUIC_PLATFORM_LINUX
+#if defined(QUIC_PLATFORM_LINUX)
     ErrorCode = clock_gettime(CLOCK_MONOTONIC, Time);
-#elif QUIC_PLATFORM_DARWIN
+#elif defined(QUIC_PLATFORM_DARWIN)
     timespec_get(Time, TIME_UTC);
 #endif // QUIC_PLATFORM_DARWIN
 
@@ -555,9 +555,9 @@ QuicProcCurrentNumber(
     void
     )
 {
-#ifdef QUIC_PLATFORM_LINUX
+#if defined(QUIC_PLATFORM_LINUX)
     return (uint32_t)sched_getcpu();
-#elif QUIC_PLATFORM_DARWIN
+#elif defined(QUIC_PLATFORM_DARWIN)
     int cpuinfo[4];   
     asm("cpuid"
             : "=a" (cpuinfo[0]),
@@ -637,7 +637,7 @@ _strnicmp(
     return strncasecmp(_Str1, _Str2, _MaxCount);
 }
 
-#if QUIC_PLATFORM_LINUX
+#if defined(QUIC_PLATFORM_LINUX)
 
 QUIC_STATUS
 QuicThreadCreate(
@@ -723,7 +723,7 @@ QuicThreadCreate(
     return Status;
 }
 
-#elif QUIC_PLATFORM_DARWIN
+#elif defined(QUIC_PLATFORM_DARWIN)
 
 QUIC_STATUS
 QuicThreadCreate(
@@ -795,12 +795,12 @@ QuicCurThreadID(
     )
 {
 
-#if QUIC_PLATFORM_LINUX
+#if defined(QUIC_PLATFORM_LINUX)
 
     QUIC_STATIC_ASSERT(sizeof(pid_t) <= sizeof(uint32_t), "PID size exceeds the expected size");
     return syscall(__NR_gettid);
 
-#elif QUIC_PLATFORM_DARWIN
+#elif defined(QUIC_PLATFORM_DARWIN)
 
     uint64_t tid;
     pthread_threadid_np(NULL, &tid);
