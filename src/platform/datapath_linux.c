@@ -40,6 +40,10 @@ Environment:
 QUIC_STATIC_ASSERT((SIZEOF_STRUCT_MEMBER(QUIC_BUFFER, Length) <= sizeof(size_t)), "(sizeof(QUIC_BUFFER.Length) == sizeof(size_t) must be TRUE.");
 QUIC_STATIC_ASSERT((SIZEOF_STRUCT_MEMBER(QUIC_BUFFER, Buffer) == sizeof(void*)), "(sizeof(QUIC_BUFFER.Buffer) == sizeof(void*) must be TRUE.");
 
+#if !defined(MAX)
+#define MAX(x,y) ((x) > (y) ? (x) : (y))
+#endif
+
 //
 // TODO: Support batching.
 //
@@ -2365,7 +2369,10 @@ QuicDataPathBindingSend(
     BOOLEAN SendPending = FALSE;
 
     const size_t ControlSize = MAX(sizeof(struct in6_pktinfo), sizeof(struct in_pktinfo));
-    char ControlBuffer[CMSG_SPACE(ControlSize)] = {0};
+    // XXX: Compiler throws error when using default initializer, since
+    // CMSG_SPACE isn't compile-time constant. I know.
+    char ControlBuffer[CMSG_SPACE(ControlSize)];
+    memset(ControlBuffer, 0, sizeof(ControlBuffer));
 
     QUIC_DBG_ASSERT(Binding != NULL && RemoteAddress != NULL && SendContext != NULL);
 
