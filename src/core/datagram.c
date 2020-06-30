@@ -10,7 +10,9 @@ Abstract:
 --*/
 
 #include "precomp.h"
+#ifdef QUIC_CLOG
 #include "datagram.c.clog.h"
+#endif
 
 #define DATAGRAM_FRAME_HEADER_LENGTH 3
 

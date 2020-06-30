@@ -101,7 +101,6 @@ param (
 Set-StrictMode -Version 'Latest'
 $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
-
 # Default TLS based on current platform.
 if ("" -eq $Tls) {
     if ($IsWindows) {

@@ -5,7 +5,9 @@
 
 --*/
 
+#ifdef QUIC_CLOG
 #include "operation.h.clog.h"
+#endif
 
 typedef struct QUIC_SEND_REQUEST QUIC_SEND_REQUEST;
 

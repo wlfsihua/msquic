@@ -10,8 +10,9 @@ Abstract:
 --*/
 
 #include "precomp.h"
+#ifdef QUIC_CLOG
 #include "library.c.clog.h"
-
+#endif
 QUIC_LIBRARY MsQuicLib = { 0 };
 
 _IRQL_requires_max_(PASSIVE_LEVEL)

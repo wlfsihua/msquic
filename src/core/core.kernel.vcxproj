@@ -141,8 +141,8 @@
   </PropertyGroup>
   <PropertyGroup>
     <TargetName>core</TargetName>
+    <OutDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\bin\</OutDir>
     <IntDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\obj\$(ProjectName)\</IntDir>
-    <OutDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\lib\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>

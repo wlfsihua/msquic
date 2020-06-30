@@ -14,8 +14,9 @@ Abstract:
 
 #include "precomp.h"
 #include <msquic_fuzz.h>
+#ifdef QUIC_CLOG
 #include "injection.c.clog.h"
-
+#endif
 __declspec(noinline)
 void
 QuicFuzzInjectHook(

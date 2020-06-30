@@ -87,7 +87,7 @@
   <PropertyGroup>
     <TargetName>testlib</TargetName>
     <IntDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\obj\$(ProjectName)\</IntDir>
-    <OutDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\lib\</OutDir>
+    <OutDir>$(SolutionDir)build\winkernel\$(Platform)_$(Configuration)_schannel\bin\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
