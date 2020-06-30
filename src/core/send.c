@@ -923,6 +923,7 @@ QuicSendPathChallenges(
         }
 
         QuicPacketBuilderFinalize(&Builder, TRUE);
+        QuicPacketBuilderCleanup(&Builder);
     }
 }
 
@@ -1138,6 +1139,13 @@ QuicSendFlush(
 
     } while (Builder.SendContext != NULL ||
         Builder.TotalCountDatagrams < QUIC_MAX_DATAGRAMS_PER_SEND);
+
+    if (Builder.SendContext != NULL) {
+        //
+        // Final send, if there is anything left over.
+        //
+        QuicPacketBuilderFinalize(&Builder, TRUE);
+    }
 
     QuicPacketBuilderCleanup(&Builder);
 

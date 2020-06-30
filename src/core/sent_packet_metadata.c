@@ -19,6 +19,38 @@ Abstract:
 #include "precomp.h"
 #include "sent_packet_metadata.c.clog.h"
 
+void
+QuicSentPacketMetadataReleaseFrames(
+    _In_ QUIC_SENT_PACKET_METADATA* Metadata
+    )
+{
+    for (uint8_t i = 0; i < Metadata->FrameCount; i++) {
+        switch (Metadata->Frames[i].Type)
+        {
+        case QUIC_FRAME_RESET_STREAM:
+            QuicStreamRelease(Metadata->Frames[i].RESET_STREAM.Stream, QUIC_STREAM_REF_SEND_PACKET);
+            break;
+        case QUIC_FRAME_MAX_STREAM_DATA:
+            QuicStreamRelease(Metadata->Frames[i].MAX_STREAM_DATA.Stream, QUIC_STREAM_REF_SEND_PACKET);
+            break;
+        case QUIC_FRAME_STREAM_DATA_BLOCKED:
+            QuicStreamRelease(Metadata->Frames[i].STREAM_DATA_BLOCKED.Stream, QUIC_STREAM_REF_SEND_PACKET);
+            break;
+        case QUIC_FRAME_STOP_SENDING:
+            QuicStreamRelease(Metadata->Frames[i].STOP_SENDING.Stream, QUIC_STREAM_REF_SEND_PACKET);
+            break;
+        case QUIC_FRAME_STREAM:
+            QuicStreamRelease(Metadata->Frames[i].STREAM.Stream, QUIC_STREAM_REF_SEND_PACKET);
+            break;
+        default:
+            //
+            // Nothing to clean up for other frame types.
+            //
+            break;
+        }
+    }
+}
+
 _IRQL_requires_max_(DISPATCH_LEVEL)
 void
 QuicSentPacketPoolInitialize(
@@ -78,31 +110,6 @@ QuicSentPacketPoolReturnPacketMetadata(
     Metadata->Flags.Freed = TRUE;
 #endif
 
-    for (uint8_t i = 0; i < Metadata->FrameCount; i++) {
-        switch (Metadata->Frames[i].Type)
-        {
-        case QUIC_FRAME_RESET_STREAM:
-            QuicStreamRelease(Metadata->Frames[i].RESET_STREAM.Stream, QUIC_STREAM_REF_SEND_PACKET);
-            break;
-        case QUIC_FRAME_MAX_STREAM_DATA:
-            QuicStreamRelease(Metadata->Frames[i].MAX_STREAM_DATA.Stream, QUIC_STREAM_REF_SEND_PACKET);
-            break;
-        case QUIC_FRAME_STREAM_DATA_BLOCKED:
-            QuicStreamRelease(Metadata->Frames[i].STREAM_DATA_BLOCKED.Stream, QUIC_STREAM_REF_SEND_PACKET);
-            break;
-        case QUIC_FRAME_STOP_SENDING:
-            QuicStreamRelease(Metadata->Frames[i].STOP_SENDING.Stream, QUIC_STREAM_REF_SEND_PACKET);
-            break;
-        case QUIC_FRAME_STREAM:
-            QuicStreamRelease(Metadata->Frames[i].STREAM.Stream, QUIC_STREAM_REF_SEND_PACKET);
-            break;
-        default:
-            //
-            // Nothing to clean up for other frame types.
-            //
-            break;
-        }
-    }
-
+    QuicSentPacketMetadataReleaseFrames(Metadata);
     QuicPoolFree(Pool->Pools + Metadata->FrameCount - 1, Metadata);
 }

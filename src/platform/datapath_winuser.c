@@ -56,7 +56,7 @@ QuicFuzzerRecvMsg(
 //
 // The maximum number of UDP datagrams that can be sent with one call.
 //
-#define QUIC_MAX_BATCH_SEND                 1
+#define QUIC_MAX_BATCH_SEND                 7
 
 //
 // The maximum UDP receive coalescing payload.
@@ -64,10 +64,9 @@ QuicFuzzerRecvMsg(
 #define MAX_URO_PAYLOAD_LENGTH              (UINT16_MAX - QUIC_UDP_HEADER_SIZE)
 
 //
-// 60K is the largest buffer most NICs can offload without any software
-// segmentation. Current generation NICs advertise (60K < limit <= 64K).
+// The maximum single buffer size for sending coalesced payloads.
 //
-#define QUIC_LARGE_SEND_BUFFER_SIZE         0xF000
+#define QUIC_LARGE_SEND_BUFFER_SIZE         0xFFFF
 
 //
 // The maximum number of UDP datagrams to preallocate for URO.
@@ -2184,7 +2183,8 @@ QuicSendContextCanAllocSend(
 static
 void
 QuicSendContextFinalizeSendBuffer(
-    _In_ QUIC_DATAPATH_SEND_CONTEXT* SendContext
+    _In_ QUIC_DATAPATH_SEND_CONTEXT* SendContext,
+    _In_ BOOLEAN IsSendingImmediately
     )
 {
     if (SendContext->ClientBuffer.len == 0) {
@@ -2217,6 +2217,8 @@ QuicSendContextFinalizeSendBuffer(
         //
         // The next segment allocation must create a new backing buffer.
         //
+        QUIC_DBG_ASSERT(IsSendingImmediately); // Future: Refactor so it's impossible to hit this.
+        UNREFERENCED_PARAMETER(IsSendingImmediately);
         SendContext->ClientBuffer.buf = NULL;
         SendContext->ClientBuffer.len = 0;
     }
@@ -2310,7 +2312,7 @@ QuicDataPathBindingAllocSendDatagram(
     QUIC_DBG_ASSERT(MaxBufferLength > 0);
     QUIC_DBG_ASSERT(MaxBufferLength <= QUIC_MAX_MTU - QUIC_MIN_IPV4_HEADER_SIZE - QUIC_UDP_HEADER_SIZE);
 
-    QuicSendContextFinalizeSendBuffer(SendContext);
+    QuicSendContextFinalizeSendBuffer(SendContext, FALSE);
 
     if (!QuicSendContextCanAllocSend(SendContext, MaxBufferLength)) {
         return NULL;
@@ -2407,7 +2409,7 @@ QuicDataPathBindingSendTo(
         goto Exit;
     }
 
-    QuicSendContextFinalizeSendBuffer(SendContext);
+    QuicSendContextFinalizeSendBuffer(SendContext, TRUE);
 
     Datapath = Binding->Datapath;
     SocketContext = &Binding->SocketContexts[Binding->Connected ? 0 : GetCurrentProcessorNumber()];
@@ -2522,7 +2524,7 @@ QuicDataPathBindingSendFromTo(
         goto Exit;
     }
 
-    QuicSendContextFinalizeSendBuffer(SendContext);
+    QuicSendContextFinalizeSendBuffer(SendContext, TRUE);
 
     Datapath = Binding->Datapath;
     SocketContext = &Binding->SocketContexts[Binding->Connected ? 0 : GetCurrentProcessorNumber()];
