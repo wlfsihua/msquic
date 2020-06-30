@@ -14,8 +14,9 @@ Environment:
 --*/
 
 #include "platform_internal.h"
+#ifdef QUIC_CLOG
 #include "platform_winuser.c.clog.h"
-
+#endif
 #if defined(QUIC_EVENTS_TRACELOGGING)
  // {ff15e657-4f26-570e-88ab-0796b258d11c}
 TRACELOGGING_DEFINE_PROVIDER(
